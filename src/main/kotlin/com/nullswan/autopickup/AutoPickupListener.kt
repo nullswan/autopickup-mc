@@ -1,11 +1,15 @@
 package com.nullswan.autopickup
 
+import org.bukkit.entity.ExperienceOrb
 import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
+import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.block.BlockDropItemEvent
+import org.bukkit.event.entity.EntityDeathEvent
 import org.bukkit.event.entity.EntityPickupItemEvent
+import org.bukkit.event.entity.EntitySpawnEvent
 import org.bukkit.event.entity.ItemSpawnEvent
 import org.bukkit.plugin.Plugin
 
@@ -89,6 +93,43 @@ class AutoPickupListener(
         } else if (added > 0) {
             item.itemStack = itemStack.clone().apply { amount = overflow }
         }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onBlockBreakXp(event: BlockBreakEvent) {
+        val xp = event.expToDrop
+        if (xp <= 0) return
+        val player = event.player
+        if (player.gameMode == org.bukkit.GameMode.SPECTATOR || player.gameMode == org.bukkit.GameMode.CREATIVE) return
+        event.expToDrop = 0
+        player.giveExp(xp)
+        logger.onXp(player, xp)
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onEntityDeathXp(event: EntityDeathEvent) {
+        val xp = event.droppedExp
+        if (xp <= 0) return
+        val killer = event.entity.killer ?: return
+        if (killer.gameMode == org.bukkit.GameMode.SPECTATOR || killer.gameMode == org.bukkit.GameMode.CREATIVE) return
+        event.droppedExp = 0
+        killer.giveExp(xp)
+        logger.onXp(killer, xp)
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    fun onXpOrbSpawn(event: EntitySpawnEvent) {
+        val orb = event.entity as? ExperienceOrb ?: return
+        val player = orb.location.getNearbyPlayers(16.0)
+            .filter { it.gameMode != org.bukkit.GameMode.SPECTATOR && it.gameMode != org.bukkit.GameMode.CREATIVE }
+            .minByOrNull { it.location.distanceSquared(orb.location) } ?: return
+
+        val xp = orb.experience
+        if (xp <= 0) return
+
+        player.giveExp(xp)
+        event.isCancelled = true
+        logger.onXp(player, xp)
     }
 
     private fun fireOverflow(player: Player, material: org.bukkit.Material, amount: Int): Boolean {
