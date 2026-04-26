@@ -1,0 +1,6 @@
+name: AutoPickup
+version: 1.0.0
+main: com.nullswan.autopickup.AutoPickupPlugin
+description: Auto-pickup drops into inventory with overflow handler support
+author: nullswan
+api-version: '1.21'
