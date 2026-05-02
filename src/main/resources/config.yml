@@ -1,0 +1,7 @@
+# AutoPickup
+
+# Emit verbose XP-handoff logs to the server log. Covers orb spawn decisions
+# (teleport/skip/no-player-in-range), pickup events, and per-tick Mending
+# repair deltas on the player's held item. Leave false in production — orb
+# events are frequent.
+debug: false

@@ -1,22 +1,36 @@
 package com.nullswan.autopickup
 
+import com.destroystokyo.paper.event.player.PlayerPickupExperienceEvent
+import org.bukkit.GameMode
 import org.bukkit.entity.ExperienceOrb
 import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
-import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.block.BlockDropItemEvent
-import org.bukkit.event.entity.EntityDeathEvent
 import org.bukkit.event.entity.EntityPickupItemEvent
 import org.bukkit.event.entity.EntitySpawnEvent
 import org.bukkit.event.entity.ItemSpawnEvent
+import org.bukkit.inventory.ItemStack
+import org.bukkit.inventory.meta.Damageable
 import org.bukkit.plugin.Plugin
+import kotlin.math.sqrt
 
 class AutoPickupListener(
     private val plugin: Plugin,
-    private val logger: PickupLogger
+    private val logger: PickupLogger,
+    private val debug: Boolean = false
 ) : Listener {
+
+    private fun dbg(msg: String) {
+        if (debug) plugin.logger.info("[XP] $msg")
+    }
+
+    private fun heldDamage(player: Player): Pair<ItemStack, Int>? {
+        val held = player.inventory.itemInMainHand
+        val meta = held.itemMeta as? Damageable ?: return null
+        return held to meta.damage
+    }
 
     @EventHandler(priority = EventPriority.HIGH)
     fun onBlockDrop(event: BlockDropItemEvent) {
@@ -95,46 +109,77 @@ class AutoPickupListener(
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun onBlockBreakXp(event: BlockBreakEvent) {
-        val xp = event.expToDrop
-        if (xp <= 0) return
-        val player = event.player
-        if (player.gameMode == org.bukkit.GameMode.SPECTATOR || player.gameMode == org.bukkit.GameMode.CREATIVE) return
-        event.expToDrop = 0
-        player.giveExp(xp)
-        logger.onXp(player, xp)
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun onEntityDeathXp(event: EntityDeathEvent) {
-        val xp = event.droppedExp
-        if (xp <= 0) return
-        val killer = event.entity.killer ?: return
-        if (killer.gameMode == org.bukkit.GameMode.SPECTATOR || killer.gameMode == org.bukkit.GameMode.CREATIVE) return
-        event.droppedExp = 0
-        killer.giveExp(xp)
-        logger.onXp(killer, xp)
-    }
-
+    // XP handoff: teleport the orb to the player's feet so vanilla pickup fires
+    // and runs ExperienceOrb#playerTouch, which is the only place Mending
+    // consumes XP into damaged enchanted items. Player#giveExp bypasses it.
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onXpOrbSpawn(event: EntitySpawnEvent) {
         val orb = event.entity as? ExperienceOrb ?: return
-        val player = orb.location.getNearbyPlayers(16.0)
-            .filter { it.gameMode != org.bukkit.GameMode.SPECTATOR && it.gameMode != org.bukkit.GameMode.CREATIVE }
-            .minByOrNull { it.location.distanceSquared(orb.location) } ?: return
+        if (orb.experience <= 0) return
 
-        val xp = orb.experience
-        if (xp <= 0) return
+        val nearest = orb.location.getNearbyPlayers(16.0)
+            .filter { it.gameMode != GameMode.SPECTATOR && it.gameMode != GameMode.CREATIVE }
+            .minByOrNull { it.location.distanceSquared(orb.location) }
 
-        player.giveExp(xp)
-        event.isCancelled = true
-        logger.onXp(player, xp)
+        if (nearest == null) {
+            dbg("spawn id=${orb.entityId} value=${orb.experience} no-player-in-16b → drop")
+            return
+        }
+
+        val dSq = orb.location.distanceSquared(nearest.location)
+
+        // Already inside vanilla's 8-block magnet? Let vanilla handle it.
+        if (dSq < MAGNET_RANGE_SQ) {
+            dbg("spawn id=${orb.entityId} value=${orb.experience} in-magnet(${"%.2f".format(sqrt(dSq))}b of ${nearest.name}) → vanilla")
+            return
+        }
+
+        // Defer to next tick so the orb is fully inserted into the world.
+        val target = nearest.location
+        plugin.server.scheduler.runTask(plugin, Runnable {
+            if (!orb.isValid) {
+                dbg("tp-skip value=${orb.experience} orb invalidated before handoff")
+                return@Runnable
+            }
+            orb.teleport(target)
+            dbg("tp value=${orb.experience} ${"%.2f".format(sqrt(dSq))}b → ${nearest.name}")
+        })
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onXpPickup(event: PlayerPickupExperienceEvent) {
+        val amount = event.experienceOrb.experience
+        if (amount <= 0) return
+
+        if (debug) {
+            val before = heldDamage(event.player)
+            val player = event.player
+            plugin.server.scheduler.runTask(plugin, Runnable {
+                val after = heldDamage(player)
+                if (before != null && after != null && before.first.isSimilar(after.first)) {
+                    val repaired = before.second - after.second
+                    if (repaired > 0) {
+                        dbg("mending: ${player.name} held=${before.first.type} repaired=${repaired}dur orb=$amount")
+                    } else {
+                        dbg("absorbed: ${player.name} +$amount xp (no mending on held ${before.first.type})")
+                    }
+                } else {
+                    dbg("absorbed: ${player.name} +$amount xp (held item changed or not damageable)")
+                }
+            })
+        }
+
+        logger.onXp(event.player, amount)
     }
 
     private fun fireOverflow(player: Player, material: org.bukkit.Material, amount: Int): Boolean {
         val overflowEvent = InventoryOverflowEvent(player, material, amount)
         plugin.server.pluginManager.callEvent(overflowEvent)
         return overflowEvent.isCancelled
+    }
+
+    companion object {
+        // Vanilla XP orbs magnet to the nearest player within 8 blocks.
+        private const val MAGNET_RANGE_SQ = 64.0
     }
 }
